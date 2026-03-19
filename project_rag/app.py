@@ -1,15 +1,11 @@
-"""
-Legal Document Intelligence Platform
-Built on Endee Vector DB + Groq LLM + RAG architecture
-Features: Source Highlighting, Clause Extraction, Risk Detection,
-          Simplification Mode, Summary Dashboard, PDF Export
-"""
+
 
 import html
+import io
 import json
 import os
+import re
 import time
-import io
 
 import msgpack
 import numpy as np
@@ -19,1142 +15,995 @@ from dotenv import load_dotenv
 from groq import Groq
 
 st.set_page_config(
-    page_title="Legal Intelligence Platform",
+    page_title="LexAI",
     page_icon="⚖️",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
-
 load_dotenv()
 
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # CONFIG
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
 def resolve_endee_url() -> str:
-    explicit_url = os.getenv("ENDEE_URL")
-    if explicit_url:
-        return explicit_url.rstrip("/")
-    hostport = os.getenv("ENDEE_HOSTPORT")
-    if hostport:
-        if hostport.startswith("http://") or hostport.startswith("https://"):
-            return hostport.rstrip("/")
-        return f"http://{hostport}".rstrip("/")
+    u = os.getenv("ENDEE_URL")
+    if u: return u.rstrip("/")
+    h = os.getenv("ENDEE_HOSTPORT")
+    if h: return (h if h.startswith("http") else f"http://{h}").rstrip("/")
     return "http://localhost:8080"
 
 ENDEE_URL        = resolve_endee_url()
 INDEX_NAME       = os.getenv("INDEX_NAME", "LEGALDOC")
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
 ENDEE_AUTH_TOKEN = os.getenv("ENDEE_AUTH_TOKEN", "")
 EMBEDDING_MODEL  = "all-MiniLM-L6-v2"
 
-# ──────────────────────────────────────────────
-# INJECT THEME
-# ──────────────────────────────────────────────
-def inject_theme() -> None:
+# ─────────────────────────────────────────────
+# THEME
+# ─────────────────────────────────────────────
+def inject_theme():
     st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:        #06090f;
-  --surface:   #0d1420;
-  --card:      #111928;
-  --border:    #1e2d45;
-  --text:      #e8edf5;
-  --muted:     #8899b4;
-  --gold:      #c9a84c;
-  --gold-dim:  #7a5f28;
-  --blue:      #3b7dd8;
-  --green:     #22c55e;
-  --red:       #ef4444;
-  --amber:     #f59e0b;
-  --radius:    14px;
+  --bg:         #212121;
+  --sidebar-bg: #171717;
+  --surface:    #2f2f2f;
+  --surface2:   #3a3a3a;
+  --border:     #3a3a3a;
+  --border2:    #4a4a4a;
+  --text:       #ececec;
+  --text2:      #b0b0b0;
+  --muted:      #6a6a6a;
+  --accent:     #10a37f;
+  --accent2:    #1abf96;
+  --accent-dim: rgba(16,163,127,0.12);
+  --accent-bd:  rgba(16,163,127,0.30);
+  --r:          12px;
+  --rsm:        8px;
 }
 
-html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+html, body,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"] {
   background: var(--bg) !important;
-  color: var(--text);
-  font-family: 'DM Sans', sans-serif;
+  color: var(--text) !important;
+  font-family: 'Inter', -apple-system, sans-serif !important;
 }
 
-[data-testid="stAppViewContainer"]::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background:
-    radial-gradient(ellipse 900px 500px at 5% 10%, rgba(57,100,180,0.12) 0%, transparent 60%),
-    radial-gradient(ellipse 600px 400px at 95% 80%, rgba(201,168,76,0.06) 0%, transparent 60%);
-  pointer-events: none;
-  z-index: 0;
-}
+/* Hide ALL Streamlit chrome */
+[data-testid="stHeader"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+[data-testid="stToolbar"],
+#MainMenu, footer, header { display: none !important; }
 
-[data-testid="stSidebar"] {
-  background: linear-gradient(180deg, #080e1a 0%, #060b15 100%) !important;
+/* Sidebar toggle button — keep visible */
+[data-testid="collapsedControl"] {
+  display: flex !important;
+  background: var(--sidebar-bg) !important;
   border-right: 1px solid var(--border) !important;
 }
+[data-testid="collapsedControl"] * { color: var(--text2) !important; }
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+  background: var(--sidebar-bg) !important;
+  border-right: 1px solid var(--border) !important;
+}
+[data-testid="stSidebar"] > div:first-child { padding: 0 !important; }
 [data-testid="stSidebar"] * { color: var(--text) !important; }
-[data-testid="stHeader"] { background: transparent !important; }
 
+/* Content area */
+.block-container {
+  max-width: 780px !important;
+  margin: 0 auto !important;
+  padding: 0 1.5rem 8rem !important;
+}
 [data-testid="stVerticalBlockBorderWrapper"] {
-  background: rgba(13,20,32,0.85) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: var(--radius) !important;
-  backdrop-filter: blur(8px);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 
-[data-testid="stMetric"] {
-  background: rgba(10,15,25,0.9) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 12px !important;
-  padding: 10px 14px !important;
-}
-[data-testid="stMetricLabel"], [data-testid="stMetricValue"] {
-  color: var(--text) !important;
-}
-
-.stMarkdown, [data-testid="stMarkdownContainer"], p, li, label, span {
-  color: var(--text);
-}
-.stButton > button {
-  width: 100%;
-  border-radius: 10px;
-  border: 1px solid var(--gold-dim) !important;
-  color: var(--gold) !important;
-  background: rgba(201,168,76,0.08) !important;
-  font-family: 'DM Sans', sans-serif;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  transition: all 0.2s ease;
-}
-.stButton > button:hover {
-  background: rgba(201,168,76,0.15) !important;
-  box-shadow: 0 0 20px rgba(201,168,76,0.2);
-  transform: translateY(-1px);
-}
-
+/* Text inputs */
 div[data-baseweb="input"] input,
-div[data-baseweb="textarea"] textarea,
-div[data-baseweb="select"] > div {
+div[data-baseweb="textarea"] textarea {
   background: var(--surface) !important;
   color: var(--text) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 10px !important;
-  font-family: 'DM Sans', sans-serif !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: var(--rsm) !important;
+  font-family: 'Inter', sans-serif !important;
+  font-size: 0.94rem !important;
+  caret-color: var(--accent) !important;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+div[data-baseweb="textarea"] textarea:focus,
+div[data-baseweb="input"] input:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-dim) !important;
+  outline: none !important;
+}
+div[data-baseweb="textarea"] textarea::placeholder,
+div[data-baseweb="input"] input::placeholder {
+  color: var(--muted) !important; opacity: 1 !important;
 }
 
+/* File uploader */
 [data-testid="stFileUploaderDropzone"] {
-  background: rgba(13,20,32,0.8) !important;
-  border: 1px dashed var(--gold-dim) !important;
-  border-radius: 12px !important;
+  background: var(--surface) !important;
+  border: 1.5px dashed var(--border2) !important;
+  border-radius: var(--r) !important;
+  transition: border-color 0.15s;
+}
+[data-testid="stFileUploaderDropzone"]:hover { border-color: var(--accent) !important; }
+[data-testid="stFileUploaderDropzone"] * { color: var(--text2) !important; }
+
+/* Buttons */
+.stButton > button {
+  font-family: 'Inter', sans-serif !important;
+  font-weight: 500 !important;
+  font-size: 0.875rem !important;
+  border-radius: var(--rsm) !important;
+  border: 1px solid var(--border2) !important;
+  background: var(--surface) !important;
+  color: var(--text2) !important;
+  transition: all 0.12s !important;
+  width: 100%;
+}
+.stButton > button:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: var(--accent-dim) !important;
+}
+.stButton > button[kind="primary"] {
+  background: var(--accent) !important;
+  color: #fff !important;
+  border-color: var(--accent) !important;
+  font-weight: 600 !important;
+}
+.stButton > button[kind="primary"]:hover {
+  background: var(--accent2) !important;
+  border-color: var(--accent2) !important;
 }
 
+/* Alert */
+[data-testid="stAlert"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: var(--rsm) !important;
+}
+[data-testid="stAlert"] * { color: var(--text2) !important; }
+
+/* Expander */
 [data-testid="stExpander"] details {
-  background: rgba(10,16,28,0.9) !important;
+  background: var(--surface) !important;
   border: 1px solid var(--border) !important;
-  border-radius: 12px !important;
+  border-radius: var(--rsm) !important;
 }
-[data-testid="stExpander"] summary * { color: var(--text) !important; }
+[data-testid="stExpander"] summary { color: var(--text2) !important; font-size: 0.82rem !important; }
 
-[data-testid="stTabs"] [role="tab"] {
-  color: var(--muted) !important;
-  font-family: 'DM Sans', sans-serif !important;
-  font-weight: 500;
+/* Hide all spinners and loading indicators */
+[data-testid="stStatus"]        { display: none !important; }
+[data-testid="stSpinner"]       { display: none !important; }
+[data-testid="stProgressBar"]   { display: none !important; }
+.stSpinner                      { display: none !important; }
+.element-container:has(.stSpinner) { display: none !important; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* ════════════════
+   SIDEBAR
+   ════════════════ */
+.sb-brand {
+  display: flex; align-items: center; gap: 10px;
+  padding: 20px 16px 16px;
+  border-bottom: 1px solid var(--border);
 }
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
-  color: var(--gold) !important;
-  border-bottom-color: var(--gold) !important;
+.sb-icon {
+  width: 32px; height: 32px; flex-shrink: 0;
+  background: var(--accent); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px;
+}
+.sb-name { font-size: 0.95rem; font-weight: 700; color: var(--text); }
+.sb-sub  { font-size: 0.62rem; color: var(--muted); margin-top: 1px; }
+.sb-divider { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+.sb-doc-pill {
+  margin: 10px 10px 4px; padding: 10px 12px;
+  background: var(--surface); border: 1px solid var(--border2);
+  border-radius: var(--rsm);
+}
+.sb-doc-name {
+  font-size: 0.8rem; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sb-doc-lang {
+  display: inline-block; margin-top: 4px; font-size: 0.62rem; font-weight: 600;
+  padding: 2px 7px; border-radius: 999px;
+  background: var(--accent-dim); border: 1px solid var(--accent-bd); color: var(--accent);
+}
+.sb-nav-label {
+  padding: 12px 14px 5px; font-size: 0.6rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted);
 }
 
-/* Custom components */
-.hero-wrap {
-  padding: 20px 0 28px;
-  position: relative;
+/* ════════════════
+   PAGE HEADER
+   ════════════════ */
+.main-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 22px 0 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 24px;
 }
-.hero-eyebrow {
-  font-family: 'DM Mono', monospace;
-  font-size: 0.72rem;
-  letter-spacing: 3px;
-  color: var(--gold);
-  text-transform: uppercase;
-  margin-bottom: 8px;
+.app-name {
+  font-size: 1.75rem; font-weight: 800; color: var(--text);
+  display: flex; align-items: center; gap: 10px; letter-spacing: -0.5px;
 }
-.hero-title {
-  font-family: 'Playfair Display', serif;
-  font-size: 2.4rem;
-  font-weight: 900;
-  color: var(--text);
-  margin: 0 0 8px;
-  line-height: 1.1;
+.app-name-icon {
+  font-size: 1.75rem; line-height: 1;
 }
-.hero-title span { color: var(--gold); }
-.hero-sub {
-  color: var(--muted);
-  font-size: 0.95rem;
-  margin-bottom: 16px;
+.doc-tag {
+  display: flex; align-items: center; gap: 0;
+  background: var(--surface); border: 1px solid var(--border2);
+  border-radius: 999px; padding: 4px 12px; overflow: hidden;
 }
-.hero-rule {
-  height: 1px;
-  background: linear-gradient(90deg, var(--gold), var(--blue), transparent);
-  border: none;
-  opacity: 0.5;
+.doc-tag-name {
+  font-size: 0.72rem; color: var(--text2);
+  max-width: 180px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.doc-tag-sep  { font-size: 0.62rem; color: var(--border2); margin: 0 6px; }
+.doc-tag-lang { font-size: 0.62rem; color: var(--muted); }
+
+/* ════════════════
+   WELCOME
+   ════════════════ */
+.welcome-wrap {
+  text-align: center; padding: 44px 0 28px;
+}
+.welcome-icon {
+  width: 64px; height: 64px; margin: 0 auto 18px;
+  background: var(--accent-dim); border: 1.5px solid var(--accent-bd);
+  border-radius: 16px; display: flex; align-items: center;
+  justify-content: center; font-size: 30px;
+}
+.welcome-title { font-size: 1.85rem; font-weight: 800; color: var(--text); margin-bottom: 8px; letter-spacing: -0.5px; }
+.welcome-desc  {
+  font-size: 0.875rem; color: var(--text2); line-height: 1.65;
+  max-width: 380px; margin: 0 auto 28px;
 }
 
-.status-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  margin-bottom: 6px;
-  background: rgba(6,9,15,0.8);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+
+/* ════════════════
+   CHAT MESSAGES
+   ════════════════ */
+.msg-group { opacity: 0; animation: msgIn 0.18s ease forwards; }
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; display: inline-block; }
-.pill { font-size: 0.7rem; font-weight: 600; padding: 2px 9px; border-radius: 999px; border: 1px solid transparent; }
-.pill-ok  { color: #bbf7d0; background: rgba(34,197,94,0.12);  border-color: rgba(34,197,94,0.4); }
-.pill-off { color: #fecaca; background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.4); }
 
-.source-card {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 12px 14px;
-  margin-bottom: 10px;
-  background: rgba(10,15,25,0.7);
-  transition: all 0.18s;
+.msg-row { display: flex; gap: 11px; padding: 14px 0; align-items: flex-start; }
+.msg-row.user-row { justify-content: flex-end; }
+
+.av {
+  width: 28px; height: 28px; flex-shrink: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; margin-top: 1px;
 }
-.source-card:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
-.source-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
-.source-rank { font-family:'DM Mono',monospace; font-size:0.78rem; color:var(--gold); font-weight:600; }
-.source-score { font-family:'DM Mono',monospace; font-size:0.78rem; color:var(--muted); }
-.source-snippet { font-size:0.84rem; color:var(--muted); line-height:1.5; }
-.highlight { background: rgba(201,168,76,0.22); border-radius:3px; padding:1px 3px; color: var(--gold); }
+.av-lex  { background: var(--accent); color: #fff; }
+.av-user { background: var(--surface2); border: 1px solid var(--border2); color: var(--text2); }
 
-.clause-card {
-  border-left: 3px solid var(--blue);
-  border-radius: 0 10px 10px 0;
-  padding: 10px 14px;
-  margin-bottom: 8px;
-  background: rgba(59,125,216,0.06);
+.bubble {
+  font-size: 0.9rem; line-height: 1.75; word-break: break-word; max-width: 88%;
 }
-.clause-type { font-family:'DM Mono',monospace; font-size:0.7rem; color:var(--blue); text-transform:uppercase; letter-spacing:1px; }
-.clause-text { font-size:0.87rem; color:var(--text); margin-top:4px; line-height:1.5; }
-
-.risk-high   { border-left: 3px solid var(--red) !important;  background: rgba(239,68,68,0.06) !important; }
-.risk-medium { border-left: 3px solid var(--amber) !important; background: rgba(245,158,11,0.06) !important; }
-.risk-low    { border-left: 3px solid var(--green) !important; background: rgba(34,197,94,0.06) !important; }
-
-.risk-badge-high   { font-size:0.7rem; font-weight:700; padding:2px 8px; border-radius:999px; color:#fecaca; background:rgba(239,68,68,0.15); border:1px solid rgba(239,68,68,0.4); }
-.risk-badge-medium { font-size:0.7rem; font-weight:700; padding:2px 8px; border-radius:999px; color:#fef3c7; background:rgba(245,158,11,0.15); border:1px solid rgba(245,158,11,0.4); }
-.risk-badge-low    { font-size:0.7rem; font-weight:700; padding:2px 8px; border-radius:999px; color:#bbf7d0; background:rgba(34,197,94,0.15); border:1px solid rgba(34,197,94,0.4); }
-
-.simple-card {
-  background: rgba(13,20,32,0.9);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 14px 16px;
-  margin-bottom: 10px;
+.bubble.user {
+  background: var(--surface); border: 1px solid var(--border2);
+  border-radius: var(--r) var(--rsm) var(--r) var(--r);
+  padding: 10px 15px; color: var(--text);
 }
-.original-text { font-size:0.83rem; color:var(--muted); font-style:italic; margin-bottom:6px; }
-.simple-text   { font-size:0.9rem; color:var(--text); line-height:1.6; }
-.arrow-badge   { font-size:0.72rem; color:var(--gold); background:rgba(201,168,76,0.1); border:1px solid var(--gold-dim); border-radius:999px; padding:1px 8px; display:inline-block; margin-bottom:6px; }
-
-.dash-stat {
-  background: rgba(10,15,25,0.9);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 16px;
-  text-align: center;
+.bubble.ai {
+  color: var(--text); padding: 2px 0; max-width: 92%;
 }
-.dash-stat-num { font-family:'Playfair Display',serif; font-size:2rem; font-weight:700; color:var(--gold); }
-.dash-stat-label { font-size:0.78rem; color:var(--muted); margin-top:2px; }
 
-.risk-gauge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  font-weight: 700;
+/* Rendered markdown inside AI bubble */
+.bubble.ai p  { margin-bottom: 0.6em; }
+.bubble.ai p:last-child { margin-bottom: 0; }
+.bubble.ai strong { font-weight: 600; color: var(--text); }
+.bubble.ai em     { font-style: italic; color: var(--text2); }
+.bubble.ai ul, .bubble.ai ol { padding-left: 1.3em; margin-bottom: 0.6em; }
+.bubble.ai li     { margin-bottom: 0.25em; }
+.bubble.ai br     { display: block; content: ""; margin-top: 0.3em; }
+
+/* ════════════════
+   CHAIN-LINK CITATION  (icon only, no number)
+   ════════════════ */
+.cite-link {
+  display: inline-flex; align-items: center; justify-content: center;
+  vertical-align: middle; margin: 0 2px;
+  text-decoration: none !important; cursor: pointer;
+  transition: opacity 0.12s;
 }
-.gauge-high   { background: rgba(239,68,68,0.15);  color:#f87171; border:1px solid rgba(239,68,68,0.4); }
-.gauge-medium { background: rgba(245,158,11,0.15); color:#fbbf24; border:1px solid rgba(245,158,11,0.4); }
-.gauge-low    { background: rgba(34,197,94,0.15);  color:#4ade80; border:1px solid rgba(34,197,94,0.4); }
+.cite-link:hover { opacity: 0.65; }
+.cite-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 17px; height: 17px;
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: 4px; flex-shrink: 0;
+  transition: background 0.12s, border-color 0.12s;
+}
+.cite-link:hover .cite-icon { background: var(--accent-dim); border-color: var(--accent-bd); }
+.cite-icon svg { width: 9px; height: 9px; display: block; }
 
-.note-muted { color: var(--muted); font-size: 0.82rem; }
+/* ════════════════
+   SOURCE CARDS
+   ════════════════ */
+.sources-panel { margin: 8px 0 4px 40px; }
+.src-item {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 8px 12px; margin-bottom: 5px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--rsm) var(--rsm) 0;
+}
+.src-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem; font-weight: 700; color: var(--accent);
+  flex-shrink: 0; min-width: 16px; margin-top: 2px;
+}
+.src-snippet {
+  font-size: 0.78rem; color: var(--text2); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.hl { background: rgba(16,163,127,0.18); border-radius: 2px; padding: 0 2px; color: var(--accent2); }
+.msg-divider { border: none; border-top: 1px solid var(--border); margin: 2px 0; }
+
+/* ════════════════
+   SIMPLIFY CARDS
+   ════════════════ */
+.simp-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--rsm); padding: 14px 16px; margin-bottom: 8px;
+}
+.simp-type {
+  font-size: 0.62rem; font-weight: 700; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px;
+}
+.simp-orig {
+  font-size: 0.75rem; color: var(--muted); font-style: italic;
+  border-left: 2px solid var(--border2); padding-left: 8px;
+  margin-bottom: 8px; line-height: 1.45;
+}
+.simp-plain { font-size: 0.875rem; color: var(--text); line-height: 1.68; }
+
+.sec-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 18px;
+}
+.sec-title { font-size: 1rem; font-weight: 600; color: var(--text); }
 </style>
 """, unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────
-# STATE
-# ──────────────────────────────────────────────
-def init_state() -> None:
-    defaults = {
-        "docs_indexed": 0,
-        "chunks_stored": 0,
-        "last_query_time": None,
+
+# ─────────────────────────────────────────────
+# SESSION STATE
+# ─────────────────────────────────────────────
+def init_state():
+    for k, v in {
         "chat_history": [],
-        "last_sources": [],
-        "current_doc_text": "",
-        "current_doc_name": "",
-        "extracted_clauses": [],
-        "risk_report": [],
-        "simplified_clauses": [],
-        "doc_summary": {},
-    }
-    for k, v in defaults.items():
+        "doc_text":     "",
+        "doc_name":     "",
+        "doc_lang":     "en",
+        "simplified":   [],
+        "view":         "home",
+        "input_key":    0,
+    }.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-# ──────────────────────────────────────────────
-# ENDEE HELPERS
-# ──────────────────────────────────────────────
-def endee_headers(json_ct: bool = False):
+
+# ─────────────────────────────────────────────
+# ENDEE + EMBEDDING
+# ─────────────────────────────────────────────
+def endee_h(json_ct=False):
     h = {}
-    if ENDEE_AUTH_TOKEN:
-        h["Authorization"] = ENDEE_AUTH_TOKEN
-    if json_ct:
-        h["Content-Type"] = "application/json"
+    if ENDEE_AUTH_TOKEN: h["Authorization"] = ENDEE_AUTH_TOKEN
+    if json_ct: h["Content-Type"] = "application/json"
     return h or None
 
-def is_endee_available() -> bool:
+def is_endee_ok() -> bool:
     try:
-        r = requests.get(f"{ENDEE_URL}/api/v1/health", headers=endee_headers(), timeout=2)
-        return r.ok
-    except Exception:
-        return False
+        return requests.get(f"{ENDEE_URL}/api/v1/health", headers=endee_h(), timeout=2).ok
+    except: return False
 
-@st.cache_resource
-def load_embedding_model():
+@st.cache_resource(show_spinner=False)
+def load_model():
     from sentence_transformers import SentenceTransformer
     return SentenceTransformer(EMBEDDING_MODEL)
 
 def create_index() -> bool:
     try:
-        r = requests.post(
-            f"{ENDEE_URL}/api/v1/index/create",
+        r = requests.post(f"{ENDEE_URL}/api/v1/index/create",
             json={"index_name": INDEX_NAME, "dim": 384, "space_type": "cosine",
                   "precision": "float32", "M": 16, "ef_con": 200},
-            headers=endee_headers(True), timeout=10,
-        )
+            headers=endee_h(True), timeout=10)
         return r.ok
-    except Exception:
-        return False
+    except: return False
 
-def delete_index() -> bool:
+def delete_index():
     try:
         r = requests.delete(f"{ENDEE_URL}/api/v1/index/{INDEX_NAME}/delete",
-                            headers=endee_headers(), timeout=10)
+                            headers=endee_h(), timeout=10)
         return r.status_code in (200, 404)
-    except Exception:
-        return False
+    except: return False
 
-def is_missing_files_error(r: requests.Response) -> bool:
-    return r.status_code == 400 and "required files missing for index" in r.text.lower()
-
-def chunk_text(text: str, chunk_size: int = 500):
+def chunk_text(text: str, size=500):
     words = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size):
-        c = " ".join(words[i: i + chunk_size])
-        if c.strip():
-            chunks.append(c)
-    return chunks
+    return [" ".join(words[i:i+size]) for i in range(0, len(words), size) if words[i:i+size]]
 
-def ingest_document(text: str, model, doc_name: str, chunk_size: int) -> int:
-    chunks = chunk_text(text, chunk_size)
-    if not chunks:
-        st.error("No chunks created."); return 0
-    embeddings = model.encode(chunks, normalize_embeddings=True)
+def ingest_doc(text: str, model, doc_name: str):
+    chunks = chunk_text(text)
+    if not chunks: return
+    embs = model.encode(chunks, normalize_embeddings=True)
     seed = f"{doc_name}-{int(time.time())}"
-    vectors = [
-        {"id": f"{seed}-{i}", "vector": emb.astype(np.float32).tolist(),
-         "meta": json.dumps({"doc": doc_name, "text": ch})}
-        for i, (ch, emb) in enumerate(zip(chunks, embeddings))
-    ]
+    vecs = [{"id": f"{seed}-{i}", "vector": e.astype(np.float32).tolist(),
+              "meta": json.dumps({"doc": doc_name, "text": c})}
+             for i, (c, e) in enumerate(zip(chunks, embs))]
     try:
         r = requests.post(f"{ENDEE_URL}/api/v1/index/{INDEX_NAME}/vector/insert",
-                          json=vectors, headers=endee_headers(True), timeout=45)
-        if r.ok:
-            return len(chunks)
-        if is_missing_files_error(r):
-            delete_index()
-            if create_index():
-                r2 = requests.post(f"{ENDEE_URL}/api/v1/index/{INDEX_NAME}/vector/insert",
-                                   json=vectors, headers=endee_headers(True), timeout=45)
-                if r2.ok:
-                    return len(chunks)
-        st.error(f"Endee error: {r.status_code} – {r.text[:200]}")
-        return 0
-    except Exception as e:
-        st.error(f"Insert failed: {e}"); return 0
+                          json=vecs, headers=endee_h(True), timeout=60)
+        if not r.ok and r.status_code == 400 and "required files missing" in r.text.lower():
+            delete_index(); create_index()
+            requests.post(f"{ENDEE_URL}/api/v1/index/{INDEX_NAME}/vector/insert",
+                          json=vecs, headers=endee_h(True), timeout=60)
+    except: pass
 
 def parse_meta(mv):
-    if isinstance(mv, bytes):
-        mv = mv.decode("utf-8", errors="replace")
-    if isinstance(mv, dict):
-        return str(mv.get("doc", "Document")), str(mv.get("text", ""))
+    if isinstance(mv, bytes): mv = mv.decode("utf-8", errors="replace")
+    if isinstance(mv, dict): return str(mv.get("doc","Doc")), str(mv.get("text",""))
     if isinstance(mv, str):
         try:
             p = json.loads(mv)
-            if isinstance(p, dict):
-                return str(p.get("doc", "Document")), str(p.get("text", ""))
-        except Exception:
-            return "Document", mv
+            if isinstance(p, dict): return str(p.get("doc","Doc")), str(p.get("text",""))
+        except: return "Document", mv
     return "Document", str(mv)
 
-def search_similar(question: str, model, top_k: int = 5):
+def do_search(question: str, model, top_k=4):
     qe = model.encode([question])[0]
     try:
-        r = requests.post(
-            f"{ENDEE_URL}/api/v1/index/{INDEX_NAME}/search",
-            json={"vector": qe.astype(np.float32).tolist(), "k": top_k},
-            headers=endee_headers(True), timeout=20,
-        )
-        if not r.ok:
-            return []
+        r = requests.post(f"{ENDEE_URL}/api/v1/index/{INDEX_NAME}/search",
+                          json={"vector": qe.astype(np.float32).tolist(), "k": top_k},
+                          headers=endee_h(True), timeout=20)
+        if not r.ok: return []
         raw = msgpack.unpackb(r.content, raw=False)
-        sources = []
-        if isinstance(raw, list):
-            for item in raw:
-                score, meta_val = None, ""
-                if isinstance(item, dict):
-                    meta_val = item.get("meta", "")
-                    score    = item.get("score", item.get("distance"))
-                elif isinstance(item, list) and len(item) > 2:
-                    score    = item[1]
-                    meta_val = item[2]
-                else:
-                    continue
-                doc_name, text = parse_meta(meta_val)
-                sources.append({"doc": doc_name, "text": text, "score": score})
-        return sources
-    except Exception as e:
-        st.error(f"Search failed: {e}"); return []
+        srcs = []
+        for item in (raw if isinstance(raw, list) else []):
+            if isinstance(item, dict):
+                mv = item.get("meta",""); sc = item.get("score", item.get("distance"))
+            elif isinstance(item, list) and len(item) > 2:
+                sc = item[1]; mv = item[2]
+            else: continue
+            dn, tx = parse_meta(mv)
+            srcs.append({"doc": dn, "text": tx, "score": sc})
+        return srcs
+    except: return []
 
-# ──────────────────────────────────────────────
-# GROQ HELPERS
-# ──────────────────────────────────────────────
-def get_groq_client():
-    if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
-        return None
-    return Groq(api_key=GROQ_API_KEY)
 
-def llm_call(prompt: str, temperature: float = 0.2, max_tokens: int = 1024) -> str:
-    client = get_groq_client()
-    if not client:
-        return "⚠️ GROQ_API_KEY missing."
-    resp = client.chat.completions.create(
+# ─────────────────────────────────────────────
+# LANGUAGE DETECTION
+# ─────────────────────────────────────────────
+def detect_lang(text: str) -> str:
+    """Detect Kannada vs English."""
+    return "kn" if sum(1 for c in text if '\u0C80' <= c <= '\u0CFF') > 50 else "en"
+
+def detect_question_lang(question: str) -> str:
+    """Detect the language the user typed their question in."""
+    return "kn" if sum(1 for c in question if '\u0C80' <= c <= '\u0CFF') > 5 else "en"
+
+
+# ─────────────────────────────────────────────
+# PDF EXTRACTION — clean text
+# ─────────────────────────────────────────────
+def extract_pdf_text(file_bytes: bytes) -> str:
+    text = ""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(file_bytes))
+        pages = [p.extract_text() or "" for p in reader.pages]
+        text = "\n".join(pages)
+    except Exception:
+        pass
+
+    if not text.strip():
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+        except Exception:
+            pass
+
+    if text:
+        # Remove non-printable / garbage bytes; keep Kannada Unicode block
+        text = re.sub(r'[^\x20-\x7E\u0C80-\u0CFF\u0900-\u097F\n\r\t]', ' ', text)
+        text = re.sub(r'[ \t]{3,}', ' ', text)
+        text = re.sub(r'\n{4,}', '\n\n', text)
+        return text.strip()
+    return text
+
+
+# ─────────────────────────────────────────────
+# LLM
+# ─────────────────────────────────────────────
+def groq_ok() -> bool:
+    return bool(GROQ_API_KEY and GROQ_API_KEY not in ("", "your_groq_api_key_here"))
+
+def llm_call(prompt: str, temperature=0.2, max_tokens=1200) -> str:
+    if not groq_ok():
+        return "⚠️ GROQ_API_KEY not configured. Add it to your .env file."
+    c = Groq(api_key=GROQ_API_KEY)
+    r = c.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    return resp.choices[0].message.content
+        temperature=temperature, max_tokens=max_tokens)
+    return r.choices[0].message.content
 
-def generate_answer(question: str, context: str, temperature: float) -> str:
-    prompt = f"""You are a legal document assistant. Use only the context below to answer.
-Context:
-{context}
+
+# Chain-link SVG — icon only, no number
+CHAIN_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" '
+    'stroke="#10a37f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" '
+    'stroke="#10a37f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
+    '</svg>'
+)
+
+def make_cite_html(idx: int, sources: list) -> str:
+    """Return a chain-link icon only — no superscript number."""
+    if 1 <= idx <= len(sources):
+        tip = html.escape(sources[idx-1].get("text","")[:90].replace('"',"'"))
+        return (f'<a class="cite-link" href="#src-{idx}" title="{tip}">'
+                f'<span class="cite-icon">{CHAIN_SVG}</span>'
+                f'</a>')
+    return ""
+
+
+def markdown_to_html(text: str) -> str:
+    """
+    Convert markdown-style formatting to clean HTML.
+    Handles **bold**, *italic*, numbered lists, bullet lists, line breaks.
+    Strips raw ** that the LLM sometimes leaves in.
+    """
+    # Bold: **text** → <strong>text</strong>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    # Italic: *text* → <em>text</em>  (single * not preceded by another *)
+    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', text)
+
+    lines = text.split('\n')
+    html_parts = []
+    in_list = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if in_list:
+                html_parts.append('</ul>')
+                in_list = False
+            html_parts.append('')
+            continue
+
+        # Numbered list: "1. " or "1) "
+        num_match = re.match(r'^(\d+)[.)]\s+(.*)', stripped)
+        # Bullet list: "- " or "• "
+        bul_match = re.match(r'^[-•]\s+(.*)', stripped)
+
+        if num_match or bul_match:
+            if not in_list:
+                html_parts.append('<ul style="padding-left:1.4em;margin:0.4em 0">')
+                in_list = True
+            content = num_match.group(2) if num_match else bul_match.group(1)
+            html_parts.append(f'<li style="margin-bottom:0.3em">{content}</li>')
+        else:
+            if in_list:
+                html_parts.append('</ul>')
+                in_list = False
+            html_parts.append(f'<p style="margin-bottom:0.5em">{stripped}</p>')
+
+    if in_list:
+        html_parts.append('</ul>')
+
+    return '\n'.join(html_parts)
+
+
+def render_answer(answer_text: str, sources: list) -> str:
+    """
+    1. Replace [N] citation markers with chain-link icons (no number).
+    2. Convert markdown to clean HTML.
+    """
+    # Step 1: extract and replace citations before markdown conversion
+    # to avoid markdown processing interfering with brackets
+    cite_map = {}
+    def store_cite(m):
+        idx = int(m.group(1))
+        placeholder = f"__CITE_{idx}__"
+        cite_map[placeholder] = make_cite_html(idx, sources)
+        return placeholder
+
+    text = re.sub(r'\[(\d+)\]', store_cite, answer_text)
+
+    # Step 2: convert markdown to HTML
+    text = markdown_to_html(text)
+
+    # Step 3: restore citations
+    for placeholder, cite_html in cite_map.items():
+        text = text.replace(html.escape(placeholder), cite_html)
+        text = text.replace(placeholder, cite_html)
+
+    return text
+
+
+# ─────────────────────────────────────────────
+# ANSWER GENERATION
+# ─────────────────────────────────────────────
+def generate_answer(question: str, sources: list, q_lang: str) -> str:
+    """
+    Answer language = question language, regardless of document language.
+    If question is in Kannada → answer in Kannada.
+    If question is in English → answer in English.
+    """
+    if not sources:
+        if q_lang == "kn":
+            return "ಈ ಪ್ರಶ್ನೆಗೆ ಉತ್ತರಿಸಲು ದಾಖಲೆಯಲ್ಲಿ ಸಂಬಂಧಿತ ವಿಭಾಗಗಳು ಸಿಗಲಿಲ್ಲ. ದಯವಿಟ್ಟು ಮತ್ತೊಮ್ಮೆ ಪ್ರಯತ್ನಿಸಿ."
+        return "I could not find relevant sections in the document to answer this. Please try rephrasing."
+
+    ctx = "\n\n".join(f"[Source {i}]: {s['text']}" for i, s in enumerate(sources, 1))
+
+    if q_lang == "kn":
+        lang_rule = """
+
+CRITICAL LANGUAGE RULE:
+The user asked in Kannada. You MUST reply ENTIRELY in Kannada (ಕನ್ನಡ).
+Every single word of your answer must be in Kannada script.
+Do not use any English words except proper nouns, legal terms, or names that appear in the source.
+Write naturally as a fluent Kannada speaker would explain this to another person.
+Do NOT transliterate — use proper Kannada Unicode script throughout."""
+    else:
+        lang_rule = """
+
+Reply in clear, professional English. Use plain language — avoid unnecessary legal jargon."""
+
+    prompt = f"""You are a precise legal document assistant.
+Answer the question using ONLY the information in the sources provided below.
+Do NOT fabricate or guess. If the answer is not in the sources, say so clearly.
+After each factual statement, place a citation marker like [1] or [2] immediately after the relevant sentence.
+Format your answer clearly — use numbered lists or paragraphs as appropriate.
+Do NOT use ** for bold or * for italic — write clean plain text only.{lang_rule}
+
+{ctx}
 
 Question: {question}
 
-Answer with precision. If the context doesn't contain the answer, say so."""
-    return llm_call(prompt, temperature)
+Answer:"""
 
-# ──────────────────────────────────────────────
-# CLAUSE EXTRACTION
-# ──────────────────────────────────────────────
-CLAUSE_KEYWORDS = {
-    "termination":    ["terminat", "cancel", "end of agreement", "expir"],
-    "payment":        ["payment", "fee", "invoice", "billing", "price", "cost", "rate"],
-    "liability":      ["liabil", "indemnif", "damages", "loss", "harm"],
-    "confidentiality":["confidential", "nda", "non-disclosure", "proprietary", "secret"],
-    "intellectual_property": ["intellectual property", "ip", "copyright", "patent", "trademark", "ownership"],
-    "dispute_resolution": ["arbitration", "mediation", "dispute", "jurisdiction", "governing law"],
-    "non_compete":    ["non-compete", "non compete", "competing", "restraint of trade"],
-    "warranty":       ["warrant", "guarantee", "represent", "assur"],
-    "force_majeure":  ["force majeure", "act of god", "unforeseen", "circumstances beyond"],
-    "limitation_of_liability": ["limitation of liability", "limit.*liab", "maximum liability", "cap on"],
-    "assignment":     ["assign", "transfer", "delegate", "novat"],
-    "renewal":        ["renew", "auto-renew", "extension", "rollover"],
-}
+    return llm_call(prompt, 0.15, 1200)
 
-def extract_clauses_rule_based(text: str) -> list:
-    paragraphs = [p.strip() for p in text.split("\n") if len(p.strip()) > 40]
-    results = []
-    seen = set()
-    for para in paragraphs:
-        para_lower = para.lower()
-        for clause_type, keywords in CLAUSE_KEYWORDS.items():
-            for kw in keywords:
-                if kw in para_lower and para[:60] not in seen:
-                    seen.add(para[:60])
-                    results.append({
-                        "type": clause_type.replace("_", " ").title(),
-                        "text": para[:600],
-                        "keyword_matched": kw,
-                    })
-                    break
-    return results[:30]
 
-def extract_clauses_llm(text: str) -> list:
-    prompt = f"""You are a legal analyst. Extract all important clauses from this document.
-Return a JSON array where each element is:
-{{"type": "Clause Type", "text": "exact text from document", "summary": "brief summary"}}
+# ─────────────────────────────────────────────
+# SIMPLIFY
+# ─────────────────────────────────────────────
+def simplify_doc(text: str, lang: str) -> list:
+    if not groq_ok():
+        return [{"type":"Config Error","original":"","simple":"GROQ_API_KEY not configured."}]
+    ln = ("\nDocument is in Kannada. Write all explanations in simple Kannada script."
+          if lang == "kn" else "")
+    prompt = f"""You are a legal plain-language expert.
+Identify 8-12 key provisions from this legal document and explain each simply.{ln}
+Write in plain everyday language — no jargon, no ** or * markdown symbols.
 
-Only return the JSON array, no other text.
+Return ONLY a valid JSON array. Each element:
+  "type"     - short label (e.g. "Payment Terms")
+  "original" - first 100 chars of the relevant clause
+  "simple"   - plain explanation in 1-3 sentences
+
+No markdown fences. JSON array only.
 
 Document:
-{text[:6000]}
-"""
-    raw = llm_call(prompt, temperature=0.1, max_tokens=2000)
+{text[:6000]}"""
     try:
-        raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        return json.loads(raw)
-    except Exception:
-        return []
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", llm_call(prompt, 0.2, 2500).strip())
+        result = json.loads(raw)
+        return result if isinstance(result, list) and result else [
+            {"type":"Notice","original":"","simple":"Could not parse. Please try again."}]
+    except Exception as ex:
+        return [{"type":"Error","original":"","simple":f"Simplification failed: {ex}"}]
 
-# ──────────────────────────────────────────────
-# RISK DETECTION
-# ──────────────────────────────────────────────
-RISK_RULES = {
-    "Missing termination clause":        (["terminat", "cancel"], "high",   "No termination clause found — either party may be locked indefinitely."),
-    "Missing limitation of liability":   (["limitation of liability", "limit.*liab"], "high", "No liability cap found — exposure could be unlimited."),
-    "Missing confidentiality clause":    (["confidential", "non-disclosure"], "medium", "No confidentiality protections — sensitive info may not be protected."),
-    "Missing dispute resolution clause": (["arbitration", "mediation", "dispute"], "medium", "No dispute resolution mechanism — litigation by default."),
-    "Missing payment terms":             (["payment", "fee", "invoice"], "medium", "No clear payment terms — financial obligations are ambiguous."),
-    "Missing warranty clause":           (["warrant", "guarantee"], "low", "No warranty provisions — service quality undefined."),
-    "Missing force majeure":             (["force majeure", "act of god"], "low", "No force majeure clause — parties may be liable for unforeseeable events."),
-    "Missing renewal terms":             (["renew", "auto-renew", "extension"], "low", "No renewal clause — agreement terms on expiry are unclear."),
-}
 
-RISKY_TERMS = [
-    ("sole discretion",       "high",   "'Sole discretion' grants unilateral power — one-sided."),
-    ("irrevocable",           "high",   "'Irrevocable' terms cannot be undone — high commitment risk."),
-    ("unlimited liability",   "high",   "Explicit unlimited liability — extremely risky."),
-    ("indemnify and hold harmless", "high", "Broad indemnification — may cover third-party claims."),
-    ("automatically renews",  "medium", "Auto-renewal without active consent — review cancellation window."),
-    ("non-refundable",        "medium", "Non-refundable payments even if service fails."),
-    ("assigns this agreement","medium", "Agreement can be transferred without consent."),
-    ("waive any claim",       "high",   "Broad claim waiver — may forfeit legal rights."),
-    ("as is",                 "medium", "No warranty expressed — take what you get."),
-]
-
-def detect_risks(text: str, clauses: list) -> list:
-    risks = []
-    text_lower = text.lower()
-    clause_types_lower = [c.get("type", "").lower() for c in clauses]
-
-    # Rule-based missing clause checks
-    for risk_name, (keywords, level, explanation) in RISK_RULES.items():
-        found = any(kw in text_lower for kw in keywords)
-        clause_found = any(kw in " ".join(clause_types_lower) for kw in [keywords[0]])
-        if not found and not clause_found:
-            risks.append({
-                "name": risk_name,
-                "level": level,
-                "explanation": explanation,
-                "type": "missing_clause",
-                "text_excerpt": "",
-            })
-
-    # Risky term scan
-    for term, level, explanation in RISKY_TERMS:
-        idx = text_lower.find(term)
-        if idx != -1:
-            start = max(0, idx - 60)
-            end   = min(len(text), idx + len(term) + 60)
-            excerpt = "…" + text[start:end] + "…"
-            risks.append({
-                "name": f"Risky term: '{term}'",
-                "level": level,
-                "explanation": explanation,
-                "type": "risky_term",
-                "text_excerpt": excerpt,
-            })
-
-    return risks
-
-def enrich_risk_with_llm(risks: list, text: str) -> list:
-    if not risks or not get_groq_client():
-        return risks
-    risk_names = [r["name"] for r in risks[:8]]
-    prompt = f"""You are a legal risk analyst. For each risk below, provide a short (1-2 sentence) 
-professional explanation of why it matters and what the consequence could be.
-
-Risks identified:
-{json.dumps(risk_names)}
-
-Document excerpt:
-{text[:3000]}
-
-Return a JSON object mapping each risk name to its explanation.
-Return only JSON, no other text."""
-    try:
-        raw = llm_call(prompt, temperature=0.1, max_tokens=1000)
-        raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        enrichments = json.loads(raw)
-        for r in risks:
-            if r["name"] in enrichments:
-                r["llm_explanation"] = enrichments[r["name"]]
-    except Exception:
-        pass
-    return risks
-
-# ──────────────────────────────────────────────
-# SIMPLIFICATION
-# ──────────────────────────────────────────────
-def simplify_clauses(clauses: list) -> list:
-    if not clauses or not get_groq_client():
-        return []
-    items = [{"type": c.get("type",""), "text": c.get("text","")[:400]} for c in clauses[:12]]
-    prompt = f"""You are a plain-English legal translator for non-lawyers.
-For each clause below, rewrite it in simple, everyday English (1-3 sentences max).
-
-Clauses:
-{json.dumps(items)}
-
-Return a JSON array where each element has:
-{{"type": "Clause Type", "original": "first 100 chars", "simple": "plain English version"}}
-Return only the JSON array."""
-    try:
-        raw = llm_call(prompt, temperature=0.3, max_tokens=2000)
-        raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        return json.loads(raw)
-    except Exception:
-        return []
-
-# ──────────────────────────────────────────────
-# DOCUMENT SUMMARY
-# ──────────────────────────────────────────────
-def build_summary(text: str, clauses: list, risks: list) -> dict:
-    high_risks   = [r for r in risks if r["level"] == "high"]
-    medium_risks = [r for r in risks if r["level"] == "medium"]
-    low_risks    = [r for r in risks if r["level"] == "low"]
-
-    if len(high_risks) >= 3:
-        overall_risk = "HIGH"
-    elif len(high_risks) >= 1 or len(medium_risks) >= 3:
-        overall_risk = "MEDIUM"
-    else:
-        overall_risk = "LOW"
-
-    llm_summary = ""
-    if get_groq_client():
-        prompt = f"""Summarize this legal document in 3-4 sentences. Be concise and factual.
-Document:
-{text[:4000]}"""
-        llm_summary = llm_call(prompt, temperature=0.2, max_tokens=300)
-
-    return {
-        "clause_count": len(clauses),
-        "risk_count": len(risks),
-        "high_risk_count": len(high_risks),
-        "medium_risk_count": len(medium_risks),
-        "low_risk_count": len(low_risks),
-        "overall_risk": overall_risk,
-        "word_count": len(text.split()),
-        "llm_summary": llm_summary,
-        "clause_types": list({c.get("type","") for c in clauses}),
-    }
-
-# ──────────────────────────────────────────────
-# PDF EXPORT
-# ──────────────────────────────────────────────
-def generate_pdf_report(doc_name: str, summary: dict, clauses: list, risks: list, simplified: list) -> bytes:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.colors import HexColor, white, black
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-    from reportlab.lib.units import cm
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4,
-                            leftMargin=2*cm, rightMargin=2*cm,
-                            topMargin=2.5*cm, bottomMargin=2*cm)
-
-    DARK      = HexColor("#06090f")
-    SURFACE   = HexColor("#0d1420")
-    GOLD      = HexColor("#c9a84c")
-    BLUE      = HexColor("#3b7dd8")
-    RED       = HexColor("#ef4444")
-    AMBER     = HexColor("#f59e0b")
-    GREEN     = HexColor("#22c55e")
-    MUTED     = HexColor("#8899b4")
-    TEXT      = HexColor("#e8edf5")
-    WHITE     = white
-
-    styles = getSampleStyleSheet()
-
-    def ps(name, **kwargs):
-        return ParagraphStyle(name, **kwargs)
-
-    title_style    = ps("T", fontSize=22, textColor=GOLD, spaceAfter=4, fontName="Helvetica-Bold")
-    sub_style      = ps("S", fontSize=10, textColor=MUTED, spaceAfter=16, fontName="Helvetica")
-    h2_style       = ps("H2", fontSize=14, textColor=GOLD, spaceAfter=8, spaceBefore=16, fontName="Helvetica-Bold")
-    body_style     = ps("B", fontSize=9, textColor=TEXT, spaceAfter=6, fontName="Helvetica", leading=14)
-    clause_style   = ps("C", fontSize=8.5, textColor=MUTED, spaceAfter=4, fontName="Helvetica", leading=13)
-    label_style    = ps("L", fontSize=8, textColor=GOLD, fontName="Helvetica-Bold")
-    risk_h_style   = ps("RH", fontSize=9, textColor=RED,   fontName="Helvetica-Bold")
-    risk_m_style   = ps("RM", fontSize=9, textColor=AMBER, fontName="Helvetica-Bold")
-    risk_l_style   = ps("RL", fontSize=9, textColor=GREEN, fontName="Helvetica-Bold")
-
-    story = []
-
-    # Title block
-    story.append(Paragraph("⚖ Legal Intelligence Report", title_style))
-    story.append(Paragraph(f"Document: {doc_name}  |  Generated: {time.strftime('%B %d, %Y')}", sub_style))
-    story.append(HRFlowable(width="100%", thickness=1, color=GOLD, spaceAfter=16))
-
-    # Summary stats table
-    risk_color = {"HIGH": RED, "MEDIUM": AMBER, "LOW": GREEN}.get(summary.get("overall_risk","LOW"), GREEN)
-    stat_data = [
-        [Paragraph("OVERALL RISK", label_style),
-         Paragraph("CLAUSES", label_style),
-         Paragraph("RISKS FOUND", label_style),
-         Paragraph("WORD COUNT", label_style)],
-        [Paragraph(f"<font color='#{risk_color.hexval()[2:]}' size='12'><b>{summary.get('overall_risk','–')}</b></font>", body_style),
-         Paragraph(str(summary.get("clause_count","–")), body_style),
-         Paragraph(str(summary.get("risk_count","–")), body_style),
-         Paragraph(str(summary.get("word_count","–")), body_style)],
-    ]
-    stat_tbl = Table(stat_data, colWidths=["25%","25%","25%","25%"])
-    stat_tbl.setStyle(TableStyle([
-        ("BACKGROUND",   (0,0),(-1,0), SURFACE),
-        ("BACKGROUND",   (0,1),(-1,1), DARK),
-        ("TEXTCOLOR",    (0,0),(-1,-1), TEXT),
-        ("GRID",         (0,0),(-1,-1), 0.3, MUTED),
-        ("PADDING",      (0,0),(-1,-1), 10),
-        ("ALIGN",        (0,0),(-1,-1), "CENTER"),
-        ("ROUNDEDCORNERS", [4]),
-    ]))
-    story.append(stat_tbl)
-    story.append(Spacer(1, 12))
-
-    # LLM Summary
-    if summary.get("llm_summary"):
-        story.append(Paragraph("Document Summary", h2_style))
-        story.append(Paragraph(summary["llm_summary"], body_style))
-
-    # Clauses
-    if clauses:
-        story.append(Paragraph("Extracted Clauses", h2_style))
-        for c in clauses[:20]:
-            story.append(Paragraph(f"<b>[{c.get('type','')}]</b>", label_style))
-            text_val = c.get("text", c.get("summary",""))[:400]
-            story.append(Paragraph(text_val, clause_style))
-            story.append(Spacer(1, 4))
-
-    # Risks
-    if risks:
-        story.append(Paragraph("Risk Analysis", h2_style))
-        for r in risks:
-            lvl = r.get("level","low")
-            rstyle = {"high": risk_h_style, "medium": risk_m_style, "low": risk_l_style}.get(lvl, risk_l_style)
-            badge = {"high": "🔴 HIGH", "medium": "🟡 MEDIUM", "low": "🟢 LOW"}.get(lvl,"🟢 LOW")
-            story.append(Paragraph(f"{badge}  {r['name']}", rstyle))
-            exp = r.get("llm_explanation") or r.get("explanation","")
-            story.append(Paragraph(exp, clause_style))
-            if r.get("text_excerpt"):
-                story.append(Paragraph(f"<i>{r['text_excerpt'][:200]}</i>", clause_style))
-            story.append(Spacer(1, 4))
-
-    # Simplified
-    if simplified:
-        story.append(Paragraph("Plain-English Summary", h2_style))
-        for s in simplified[:12]:
-            story.append(Paragraph(f"<b>{s.get('type','')}</b>", label_style))
-            story.append(Paragraph(s.get("simple",""), body_style))
-            story.append(Spacer(1, 4))
-
-    doc.build(story)
-    buf.seek(0)
-    return buf.read()
-
-# ──────────────────────────────────────────────
-# UI COMPONENTS
-# ──────────────────────────────────────────────
-def status_badge(label: str, ok: bool) -> str:
-    color = "#22c55e" if ok else "#ef4444"
-    pill  = "pill-ok" if ok else "pill-off"
-    txt   = "LIVE" if ok else "OFF"
-    return (f"<div class='status-row'>"
-            f"<div style='display:flex;align-items:center;'>"
-            f"<span class='status-dot' style='background:{color}'></span>"
-            f"<span style='font-size:.85rem'>{html.escape(label)}</span></div>"
-            f"<span class='pill {pill}'>{txt}</span></div>")
-
-def render_header() -> None:
-    st.markdown("""
-<div class="hero-wrap">
-  <div class="hero-eyebrow">⚖ Legal Intelligence Platform</div>
-  <h1 class="hero-title">Document <span>Analysis</span> Suite</h1>
-  <p class="hero-sub">Powered by Endee Vector DB · Groq LLM · RAG Architecture</p>
-  <hr class="hero-rule">
-</div>
-""", unsafe_allow_html=True)
-
-def render_sidebar(endee_ok: bool) -> dict:
+# ─────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────
+def render_sidebar():
     with st.sidebar:
-        st.markdown("### System Status")
-        st.markdown(status_badge("Vector DB (Endee)", endee_ok), unsafe_allow_html=True)
-        st.markdown(status_badge("LLM (Groq)", bool(GROQ_API_KEY and GROQ_API_KEY != "your_groq_api_key_here")), unsafe_allow_html=True)
-        st.markdown(status_badge("Document Loaded", bool(st.session_state.current_doc_text)), unsafe_allow_html=True)
-        st.markdown("---")
-        st.markdown("### Settings")
-        top_k      = st.slider("Retrieval Top-K", 1, 8, 4)
-        temperature= st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
-        chunk_size = st.slider("Chunk Size (words)", 200, 900, 500, 50)
-        st.markdown("---")
-        if st.button("🔄 Initialize Index"):
-            if create_index():
-                st.success("Index ready")
-            else:
-                st.error("Failed — is Endee running?")
-        st.markdown(f"<div class='note-muted'>Index: <b>{INDEX_NAME}</b><br>Endee: <code>{ENDEE_URL}</code></div>", unsafe_allow_html=True)
-    return {"top_k": top_k, "temperature": temperature, "chunk_size": chunk_size}
+        st.markdown("""
+<div class="sb-brand">
+  <div class="sb-icon">⚖️</div>
+  <div>
+    <div class="sb-name">LexAI</div>
+    <div class="sb-sub">Legal Document Assistant</div>
+  </div>
+</div>""", unsafe_allow_html=True)
 
-def render_upload_tab(endee_ok: bool, settings: dict):
-    st.markdown("#### Upload Legal Document")
-    col_l, col_r = st.columns([2, 1])
-    with col_l:
-        uploaded = st.file_uploader("Upload .txt or .pdf", type=["txt", "pdf"])
-    with col_r:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.session_state.current_doc_name:
-            st.success(f"✓ {st.session_state.current_doc_name}")
+        doc_loaded = bool(st.session_state.doc_text)
+        if doc_loaded:
+            lang  = st.session_state.doc_lang
+            flag  = "🇮🇳 Kannada" if lang == "kn" else "🇬🇧 English"
+            st.markdown(f"""
+<div class="sb-doc-pill">
+  <div class="sb-doc-name">📎 {html.escape(st.session_state.doc_name)}</div>
+  <div class="sb-doc-lang">{flag}</div>
+</div>""", unsafe_allow_html=True)
+
+        st.markdown("<hr class='sb-divider'>", unsafe_allow_html=True)
+        st.markdown("<div class='sb-nav-label'>Navigation</div>", unsafe_allow_html=True)
+
+        view = st.session_state.view
+        if st.button("💬  Chat", key="nav_chat", use_container_width=True,
+                     type="primary" if view == "home" else "secondary"):
+            st.session_state.view = "home"; st.rerun()
+
+        if st.button("🧠  Simplify Document", key="nav_simp", use_container_width=True,
+                     type="primary" if view == "simplify" else "secondary"):
+            if doc_loaded:
+                st.session_state.view = "simplify"; st.rerun()
+
+        st.markdown("<hr class='sb-divider'>", unsafe_allow_html=True)
+        if st.button("📄  New Document", key="nav_new", use_container_width=True):
+            st.session_state.doc_text     = ""
+            st.session_state.doc_name     = ""
+            st.session_state.doc_lang     = "en"
+            st.session_state.chat_history = []
+            st.session_state.simplified   = []
+            st.session_state.view         = "home"
+            st.rerun()
+
+
+# ─────────────────────────────────────────────
+# UPLOAD PAGE  — shown when no document loaded
+# ─────────────────────────────────────────────
+def upload_page():
+    """Renders ONLY the welcome screen and upload card. No chat widgets at all."""
+    st.markdown("""
+<div class="welcome-wrap">
+  <div class="welcome-icon">⚖️</div>
+  <div class="welcome-title">LexAI</div>
+  <div class="welcome-desc">
+    Upload a legal document and ask questions in natural language.<br>
+    Precise answers with references to the exact source text.<br>
+    <strong>Supports English &amp; Kannada.</strong>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="upload-card">', unsafe_allow_html=True)
+    st.markdown('<div class="upload-label">Upload your document</div>', unsafe_allow_html=True)
+    st.markdown('<div class="upload-hint">Supported: .txt, .pdf &mdash; English and Kannada</div>', unsafe_allow_html=True)
+
+    uploaded = st.file_uploader(
+        "", type=["txt", "pdf"],
+        label_visibility="collapsed",
+        key="file_uploader"
+    )
 
     if uploaded:
-        if uploaded.name.endswith(".pdf"):
-            try:
-                from pypdf import PdfReader
-                reader = PdfReader(io.BytesIO(uploaded.getvalue()))
-                text = "\n".join(page.extract_text() or "" for page in reader.pages)
-            except Exception as e:
-                st.error(f"PDF read error: {e}"); return
+        if uploaded.name.lower().endswith(".pdf"):
+            text = extract_pdf_text(uploaded.getvalue())
+            if not text.strip():
+                st.error("Could not extract text from this PDF. It may be image-based or protected.")
+                st.markdown('</div>', unsafe_allow_html=True)
+                return
         else:
             text = uploaded.getvalue().decode("utf-8", errors="replace")
 
-        est_chunks = len(chunk_text(text, settings["chunk_size"]))
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Characters", f"{len(text):,}")
-        c2.metric("Words", f"{len(text.split()):,}")
-        c3.metric("Est. Chunks", est_chunks)
+        if not text.strip():
+            st.error("The file appears to be empty.")
+            st.markdown('</div>', unsafe_allow_html=True)
+            return
 
-        with st.expander("📄 Preview (first 1000 chars)"):
-            st.text(text[:1000] + ("…" if len(text) > 1000 else ""))
+        lang     = detect_lang(text)
+        lang_msg = ("🇮🇳 Kannada document detected." if lang == "kn"
+                    else "🇬🇧 English document detected.")
+        st.info(f"{lang_msg}  Ask in Kannada or English — answers will match your question language.")
 
-        if st.button("⬆ Ingest to Vector DB", disabled=not endee_ok):
-            model = load_embedding_model()
-            with st.status("Ingesting document…", expanded=True) as s:
-                s.write("Chunking text…")
-                s.write("Generating embeddings…")
-                count = ingest_document(text, model, uploaded.name, settings["chunk_size"])
-                if count > 0:
-                    st.session_state.docs_indexed    += 1
-                    st.session_state.chunks_stored   += count
-                    st.session_state.current_doc_text = text
-                    st.session_state.current_doc_name = uploaded.name
-                    s.update(label="✓ Ingestion complete", state="complete", expanded=False)
-                    st.success(f"Stored {count} chunks.")
-                else:
-                    s.update(label="✗ Ingestion failed", state="error")
+        if st.button("Start Chatting →", type="primary", use_container_width=True, key="start_btn"):
+            model = load_model()
+            ingest_doc(text, model, uploaded.name)
+            st.session_state.doc_text     = text
+            st.session_state.doc_name     = uploaded.name
+            st.session_state.doc_lang     = lang
+            st.session_state.chat_history = []
+            st.session_state.simplified   = []
+            st.session_state.input_key   += 1
+            st.rerun()
 
-        if not endee_ok:
-            st.warning("Vector DB offline — document stored locally only.")
-            st.session_state.current_doc_text = text
-            st.session_state.current_doc_name = uploaded.name
+    st.markdown('</div>', unsafe_allow_html=True)
 
-def render_qa_tab(endee_ok: bool, settings: dict):
-    st.markdown("#### Ask Questions — with Source Highlighting")
-    question = st.text_area("Your question", height=100, placeholder="e.g. What is the termination notice period?")
-    if st.button("🔍 Search & Answer", disabled=not question.strip()):
-        model   = load_embedding_model()
-        t_start = time.perf_counter()
-        with st.status("Searching knowledge base…", expanded=True) as s:
-            s.write("Embedding question…")
-            sources = search_similar(question.strip(), model, settings["top_k"])
-            s.write("Generating answer…")
-            context = "\n\n".join(src["text"] for src in sources)
-            answer  = generate_answer(question.strip(), context, settings["temperature"])
-            elapsed = time.perf_counter() - t_start
-            st.session_state.last_query_time = elapsed
-            st.session_state.last_sources    = sources
-            s.update(label="✓ Done", state="complete", expanded=False)
 
+# ─────────────────────────────────────────────
+# CHAT PAGE  — shown when document is loaded
+# ─────────────────────────────────────────────
+def chat_page(endee_ok: bool):
+    """Renders ONLY the chat interface. No upload widgets at all."""
+    doc_text = st.session_state.doc_text
+    doc_name = st.session_state.doc_name
+    doc_lang = st.session_state.doc_lang
+
+    # Header
+    lang_label = "Kannada" if doc_lang == "kn" else "English"
+    st.markdown(f"""
+<div class="main-header">
+  <div class="app-name"><span class="app-name-icon">⚖️</span> LexAI</div>
+  <div class="doc-tag">
+    <span class="doc-tag-name">📎 {html.escape(doc_name)}</span>
+    <span class="doc-tag-sep">·</span>
+    <span class="doc-tag-lang">{lang_label}</span>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # Empty state
+    if not st.session_state.chat_history:
+        ask_label = "ಪ್ರಶ್ನೆ ಕೇಳಿ" if doc_lang == "kn" else "Ask a question"
+        st.markdown(f"""
+<div style="text-align:center;padding:32px 0 16px;">
+  <div style="font-size:0.88rem;color:var(--text2)">
+    {ask_label} about <strong style="color:var(--text)">{html.escape(doc_name)}</strong>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # Conversation history
+    history = st.session_state.chat_history
+    for idx, msg in enumerate(history):
+        role    = msg["role"]
+        content = msg["content"]
+        sources = msg.get("sources", [])
+        delay   = min(idx * 0.025, 0.2)
+
+        if role == "user":
+            st.markdown(f"""
+<div class="msg-group" style="animation-delay:{delay}s">
+  <div class="msg-row user-row">
+    <div class="bubble user">{html.escape(content)}</div>
+    <div class="av av-user">You</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+        else:
+            rendered = render_answer(content, sources)
+            st.markdown(f"""
+<div class="msg-group" style="animation-delay:{delay}s">
+  <div class="msg-row">
+    <div class="av av-lex">Lex</div>
+    <div class="bubble ai">{rendered}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            if sources:
+                prev_q = history[idx-1]["content"] if idx > 0 else ""
+                src_html = '<div class="sources-panel">'
+                for si, src in enumerate(sources, 1):
+                    snip = html.escape(src.get("text", "")[:260])
+                    for w in prev_q.split():
+                        if len(w) > 3:
+                            snip = snip.replace(html.escape(w),
+                                f"<span class='hl'>{html.escape(w)}</span>")
+                    src_html += (f'<div class="src-item" id="src-{si}">'
+                                 f'<div class="src-num">[{si}]</div>'
+                                 f'<div class="src-snippet">{snip}</div></div>')
+                src_html += "</div>"
+                st.markdown(src_html, unsafe_allow_html=True)
+
+        if role == "assistant" and idx < len(history) - 1:
+            st.markdown("<hr class='msg-divider'>", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:80px'></div>", unsafe_allow_html=True)
+
+    # Input bar
+    ph = "ಪ್ರಶ್ನೆ ಕೇಳಿ…" if doc_lang == "kn" else "Ask anything about your document…"
+    col_i, col_b = st.columns([11, 1])
+    with col_i:
+        question = st.text_input(
+            "", placeholder=ph, label_visibility="collapsed",
+            key=f"qi_{st.session_state.input_key}"
+        )
+    with col_b:
+        send = st.button("↑", type="primary", use_container_width=True)
+
+    if send and question.strip():
+        q_lang  = detect_question_lang(question.strip())
+        model   = load_model()
+        sources = do_search(question.strip(), model) if endee_ok else []
+        if not sources:
+            fb      = chunk_text(doc_text, 600)[:4]
+            sources = [{"doc": doc_name, "text": c, "score": None} for c in fb]
+        answer = generate_answer(question.strip(), sources, q_lang)
         st.session_state.chat_history.append({"role": "user",      "content": question.strip()})
         st.session_state.chat_history.append({"role": "assistant", "content": answer, "sources": sources})
+        st.session_state.input_key += 1
+        st.rerun()
 
-    # Chat display
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
 
-    # Source highlighting
-    if st.session_state.last_sources:
-        st.markdown("#### 📎 Source Highlights")
-        for i, src in enumerate(st.session_state.last_sources, 1):
-            score   = src.get("score")
-            score_s = f"{score:.4f}" if isinstance(score, (int, float)) else "N/A"
-            snippet = html.escape(src.get("text","")[:400])
-            doc     = html.escape(str(src.get("doc","Document")))
-            # Highlight any query words in the snippet
-            if st.session_state.chat_history:
-                last_q = next((m["content"] for m in reversed(st.session_state.chat_history) if m["role"]=="user"), "")
-                for word in last_q.split():
-                    if len(word) > 3:
-                        snippet = snippet.replace(
-                            html.escape(word),
-                            f"<span class='highlight'>{html.escape(word)}</span>",
-                        )
-            st.markdown(f"""
-<div class="source-card">
-  <div class="source-head">
-    <span class="source-rank">Source {i} — {doc}</span>
-    <span class="source-score">Score: {score_s}</span>
+# ─────────────────────────────────────────────
+# HOME VIEW  — routes to upload_page or chat_page
+# ─────────────────────────────────────────────
+def home_view(endee_ok: bool):
+    if st.session_state.doc_text:
+        chat_page(endee_ok)
+    else:
+        upload_page()
+
+
+# ─────────────────────────────────────────────
+# SIMPLIFY VIEW
+# ─────────────────────────────────────────────
+def simplify_view():
+    text = st.session_state.doc_text
+    lang = st.session_state.doc_lang
+
+    if not text:
+        st.info("Upload a document first."); return
+
+    st.markdown(f"""
+<div class="sec-header">
+  <div class="sec-title">🧠 Plain-Language Summary</div>
+  <div class="doc-tag">
+    <span class="doc-tag-name">📎 {html.escape(st.session_state.doc_name)}</span>
   </div>
-  <div class="source-snippet">{snippet}</div>
 </div>""", unsafe_allow_html=True)
+    st.markdown("<div style='font-size:.82rem;color:var(--text2);margin-bottom:18px'>"
+                "Key provisions explained in simple, everyday language.</div>",
+                unsafe_allow_html=True)
 
-def render_clauses_tab():
-    st.markdown("#### 🧾 Clause Extraction Engine")
-    text = st.session_state.current_doc_text
-    if not text:
-        st.info("Upload a document first."); return
+    if not st.session_state.simplified:
+        st.session_state.simplified = simplify_doc(text, lang)
+        st.rerun()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("📋 Extract Clauses (Rule-Based)"):
-            clauses = extract_clauses_rule_based(text)
-            st.session_state.extracted_clauses = clauses
-    with col2:
-        if st.button("🧠 Extract Clauses (LLM-Enhanced)"):
-            with st.spinner("LLM extracting…"):
-                clauses = extract_clauses_llm(text)
-                if not clauses:
-                    clauses = extract_clauses_rule_based(text)
-                st.session_state.extracted_clauses = clauses
-
-    clauses = st.session_state.extracted_clauses
-    if clauses:
-        st.markdown(f"**Found {len(clauses)} clauses**")
-        for c in clauses:
-            ctype   = html.escape(c.get("type","Unknown"))
-            ctext   = html.escape(c.get("text", c.get("summary",""))[:500])
-            csummary= html.escape(c.get("summary",""))
-            st.markdown(f"""
-<div class="clause-card">
-  <div class="clause-type">{ctype}</div>
-  <div class="clause-text">{ctext}</div>
-  {f'<div style="color:#8899b4;font-size:.8rem;margin-top:4px">{csummary}</div>' if csummary else ''}
-</div>""", unsafe_allow_html=True)
-
-def render_risk_tab():
-    st.markdown("#### ⚠️ Risk Detection System")
-    text = st.session_state.current_doc_text
-    if not text:
-        st.info("Upload a document first."); return
-
-    if st.button("🔎 Run Risk Analysis"):
-        clauses = st.session_state.extracted_clauses or extract_clauses_rule_based(text)
-        risks   = detect_risks(text, clauses)
-        with st.spinner("Enriching with LLM explanations…"):
-            risks = enrich_risk_with_llm(risks, text)
-        st.session_state.risk_report = risks
-
-    risks = st.session_state.risk_report
-    if risks:
-        high   = [r for r in risks if r["level"]=="high"]
-        medium = [r for r in risks if r["level"]=="medium"]
-        low    = [r for r in risks if r["level"]=="low"]
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("🔴 High Risk",   len(high))
-        c2.metric("🟡 Medium Risk", len(medium))
-        c3.metric("🟢 Low Risk",    len(low))
-
-        for r in sorted(risks, key=lambda x: {"high":0,"medium":1,"low":2}[x["level"]]):
-            lvl         = r["level"]
-            badge_class = f"risk-badge-{lvl}"
-            card_class  = f"clause-card risk-{lvl}"
-            exp         = html.escape(r.get("llm_explanation") or r.get("explanation",""))
-            excerpt     = html.escape(r.get("text_excerpt","")[:200])
-            st.markdown(f"""
-<div class="{card_class}">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-    <span style="font-weight:600;font-size:.9rem">{html.escape(r['name'])}</span>
-    <span class="{badge_class}">{lvl.upper()}</span>
-  </div>
-  <div class="clause-text">{exp}</div>
-  {f'<div style="font-size:.78rem;color:#8899b4;margin-top:6px;font-style:italic">{excerpt}</div>' if excerpt else ''}
-</div>""", unsafe_allow_html=True)
-
-def render_simplify_tab():
-    st.markdown("#### 🧠 Plain-English Simplification")
-    text    = st.session_state.current_doc_text
-    clauses = st.session_state.extracted_clauses
-    if not text:
-        st.info("Upload a document first."); return
-    if not clauses:
-        st.warning("Run Clause Extraction first for better results.")
-
-    if st.button("✨ Simplify All Clauses"):
-        if not clauses:
-            clauses = extract_clauses_rule_based(text)
-        with st.spinner("Translating legalese to plain English…"):
-            simplified = simplify_clauses(clauses)
-            st.session_state.simplified_clauses = simplified
-
-    simplified = st.session_state.simplified_clauses
-    if simplified:
-        st.markdown(f"**{len(simplified)} clauses simplified**")
-        for s in simplified:
-            orig   = html.escape(str(s.get("original",""))[:120])
-            simple = html.escape(str(s.get("simple","")))
-            ctype  = html.escape(str(s.get("type","")))
-            st.markdown(f"""
-<div class="simple-card">
-  <div class="clause-type">{ctype}</div>
-  <div class="original-text">Original: {orig}…</div>
-  <div class="arrow-badge">Plain English ↓</div>
-  <div class="simple-text">{simple}</div>
-</div>""", unsafe_allow_html=True)
-
-def render_dashboard_tab():
-    st.markdown("#### 📊 Document Summary Dashboard")
-    text = st.session_state.current_doc_text
-    if not text:
-        st.info("Upload a document first."); return
-
-    if st.button("📈 Generate Dashboard"):
-        clauses = st.session_state.extracted_clauses or extract_clauses_rule_based(text)
-        risks   = st.session_state.risk_report or detect_risks(text, clauses)
-        with st.spinner("Building summary…"):
-            summary = build_summary(text, clauses, risks)
-        st.session_state.doc_summary = summary
-        st.session_state.extracted_clauses = clauses
-        st.session_state.risk_report       = risks
-
-    summary = st.session_state.doc_summary
-    if summary:
-        risk_gauge_class = {"HIGH":"gauge-high","MEDIUM":"gauge-medium","LOW":"gauge-low"}.get(summary.get("overall_risk","LOW"),"gauge-low")
-        risk_icon        = {"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢"}.get(summary.get("overall_risk","LOW"),"🟢")
+    for s in st.session_state.simplified:
+        ct = html.escape(str(s.get("type", "")))
+        og = html.escape(str(s.get("original", ""))[:130])
+        sp = html.escape(str(s.get("simple", "")))
+        if not sp: continue
         st.markdown(f"""
-<div style="margin-bottom:16px">
-  <span class="risk-gauge {risk_gauge_class}">{risk_icon} Overall Risk: {summary.get('overall_risk','–')}</span>
+<div class="simp-card">
+  {f'<div class="simp-type">{ct}</div>' if ct else ''}
+  {f'<div class="simp-orig">"{og}…"</div>' if og else ''}
+  <div class="simp-plain">{sp}</div>
 </div>""", unsafe_allow_html=True)
 
-        c1, c2, c3, c4 = st.columns(4)
-        for col, num, label in zip([c1,c2,c3,c4],
-            [summary.get("clause_count",0), summary.get("risk_count",0),
-             summary.get("word_count",0), summary.get("high_risk_count",0)],
-            ["Clauses Found","Risks Detected","Document Words","High Risks"]):
-            with col:
-                st.markdown(f"""<div class="dash-stat">
-  <div class="dash-stat-num">{num}</div>
-  <div class="dash-stat-label">{label}</div>
-</div>""", unsafe_allow_html=True)
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    if st.button("Regenerate", use_container_width=True):
+        st.session_state.simplified = []
+        st.rerun()
 
-        if summary.get("llm_summary"):
-            st.markdown("---")
-            st.markdown("**AI Summary**")
-            st.info(summary["llm_summary"])
 
-        if summary.get("clause_types"):
-            st.markdown("**Clause Types Detected**")
-            cols = st.columns(min(4, len(summary["clause_types"])))
-            for i, ct in enumerate(summary["clause_types"]):
-                cols[i % len(cols)].markdown(f"`{ct}`")
-
-def render_export_tab():
-    st.markdown("#### 📥 Export Report")
-    text      = st.session_state.current_doc_text
-    doc_name  = st.session_state.current_doc_name or "document"
-    clauses   = st.session_state.extracted_clauses
-    risks     = st.session_state.risk_report
-    simplified= st.session_state.simplified_clauses
-    summary   = st.session_state.doc_summary
-
-    if not text:
-        st.info("Upload and analyse a document first."); return
-
-    missing = []
-    if not clauses:   missing.append("clauses")
-    if not risks:     missing.append("risks")
-    if not summary:   missing.append("summary")
-    if missing:
-        st.warning(f"For a complete report, also run: {', '.join(missing)}")
-
-    st.markdown("**What's included in the PDF:**")
-    st.markdown("""
-- Document summary & AI overview  
-- All extracted clauses with types  
-- Risk analysis with severity levels  
-- Plain-English simplifications  
-- Key statistics dashboard  
-""")
-
-    if st.button("📄 Generate & Download PDF Report"):
-        if not summary:
-            clauses  = clauses  or extract_clauses_rule_based(text)
-            risks    = risks    or detect_risks(text, clauses)
-            summary  = build_summary(text, clauses, risks)
-
-        with st.spinner("Building PDF…"):
-            try:
-                pdf_bytes = generate_pdf_report(doc_name, summary, clauses, risks, simplified)
-                st.download_button(
-                    label="⬇ Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"legal_report_{doc_name.replace(' ','_')}.pdf",
-                    mime="application/pdf",
-                )
-                st.success("PDF ready — click above to download.")
-            except ImportError:
-                st.error("reportlab not installed. Run: pip install reportlab")
-            except Exception as e:
-                st.error(f"PDF generation failed: {e}")
-
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # MAIN
-# ──────────────────────────────────────────────
-def main() -> None:
+# ─────────────────────────────────────────────
+def main():
     inject_theme()
     init_state()
-    endee_ok = is_endee_available()
-    settings = render_sidebar(endee_ok)
-    render_header()
+    endee_ok = is_endee_ok()
+    render_sidebar()
 
-    # Metrics row
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Documents", st.session_state.docs_indexed)
-    c2.metric("Chunks",    st.session_state.chunks_stored)
-    qt = st.session_state.last_query_time
-    c3.metric("Last Query", f"{qt:.2f}s" if isinstance(qt, float) else "–")
-    c4.metric("Clauses",   len(st.session_state.extracted_clauses))
+    if st.session_state.view == "simplify":
+        simplify_view()
+    else:
+        home_view(endee_ok)
 
-    st.markdown("")
-
-    tabs = st.tabs([
-        "📤 Upload",
-        "💬 Q&A + Sources",
-        "🧾 Clauses",
-        "⚠️ Risks",
-        "🧠 Simplify",
-        "📊 Dashboard",
-        "📥 Export",
-    ])
-
-    with tabs[0]: render_upload_tab(endee_ok, settings)
-    with tabs[1]: render_qa_tab(endee_ok, settings)
-    with tabs[2]: render_clauses_tab()
-    with tabs[3]: render_risk_tab()
-    with tabs[4]: render_simplify_tab()
-    with tabs[5]: render_dashboard_tab()
-    with tabs[6]: render_export_tab()
 
 if __name__ == "__main__":
     main()
