@@ -47,14 +47,6 @@ Standard LLMs (like GPT or LLaMA) cannot answer these questions reliably because
 
 **RAG solves all three problems.** Instead of asking the LLM to rely on its training memory, RAG forces it to retrieve the relevant passage from the actual document first, then generate an answer grounded in that passage. The LLM becomes a reasoning engine, not a memory engine.
 
-### Why This Is Production-Grade
-
-- **Semantic search** — finds relevant passages by meaning, not just keyword matching
-- **Source attribution** — every answer shows the exact document passages used
-- **Auto language detection** — silently detects English vs Kannada, no user input needed
-- **Auto-recovery** — detects when Endee loses its index (common on free cloud hosts) and rebuilds it automatically
-- **Clean text extraction** — handles garbled PDF encoding with Unicode cleaning
-- **Stateless per-session** — each user session is independent; no data leaks between users
 
 ---
 
@@ -406,7 +398,7 @@ Step 15: User sees formatted answer with clickable source references
 
 ### Why These Choices
 
-**Endee over Pinecone/Weaviate:** Endee is self-hosted, REST-first, and free. For a local-first project it avoids cloud vendor lock-in and API costs. Its HNSW implementation gives the same O(log n) search as commercial alternatives.
+
 
 **Groq over OpenAI:** Groq's hardware (LPU chips) delivers ~10x faster inference than GPU-based APIs. For a chat application where latency is visible, this matters.
 
